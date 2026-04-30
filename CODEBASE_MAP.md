@@ -264,7 +264,100 @@
 ---
 
 ## Bug 1: GCal sync cutoff (events past 2026-04-14)
-TBD — populated by Phase 0.5.
+
+### Root cause: `autoSync` is a dead UI feature
+- Settings UI (`src/components/settings/IntegrationSettings.tsx:56-83`) renders `autoSync` checkbox + `syncInterval` input. Saves to DB via `updateIntegrationSettings`.
+- Defaults: `autoSync: true`, `syncInterval: 5` (`src/store/settings.ts:77`).
+- **Zero code in `src/` reads these settings to fire a timer.** No `setInterval`, cron, BullMQ, or background job wires `autoSync`.
+- Only trigger: manual button in `src/components/calendar/FeedManager.tsx:36` → calls `syncFeed(id)` (`src/store/calendar.ts:638`) → PUT `/api/calendar/google` (`src/app/api/calendar/google/route.ts:449-626`).
+- PUT handler does **full delete-and-replace** (no incremental syncToken usage on Google path), with `timeMin/timeMax` = full year window.
+- Result: last manual click was ~2026-04-14, no events synced since.
+
+### Diagnostic for Phase 1 confirmation
+```sql
+SELECT id, name, "lastSync" FROM "CalendarFeed" WHERE type = 'GOOGLE';
+```
+Expected: `lastSync` ≈ 2026-04-14. Manual click on UI sync button → events post-Apr-14 appear immediately.
+
+### Rejected hypotheses
+- **H2 syncToken stuck/expired** — REJECTED. PUT handler at `:488-494` does not pass `syncToken` to Google API. No incremental logic exists on Google path.
+- **H3 cron/queue down** — REJECTED. There is no cron/queue system in this codebase (no Redis/BullMQ in non-SaaS build). The system was never built; it's not down.
+- **H4 frontend filter hides future events** — REJECTED. `src/app/api/events/route.ts:23-37` returns all events unfiltered by date. UI window filter (`src/store/calendar.ts:155-232`) is correct.
+
+### Lower-confidence secondary risks (worth Phase 1 quick check)
+- **Token refresh failure silently 500s** — `src/lib/token-manager.ts:46` `refreshGoogleTokens`. If Google revoked refresh token after long inactivity, `getGoogleCalendarClient` returns null, route at `:614` only catches 401 GaxiosError; generic Error("Failed to refresh tokens") falls to 500 → UI shows "Failed to sync calendar" (could be missed by user).
+- **30s Prisma transaction timeout** (`route.ts:606`) — large recurring-event load could time out + roll back, leaving feed empty. Same external symptom.
+
+### Fix options for Phase 1
+- **Minimal:** none required for the bug itself. A single manual sync click recovers events. But user wants `autoSync` to actually work.
+- **Real fix (recommended):** implement client-side `setInterval` driven by `IntegrationSettings.googleCalendarInterval` that calls `syncAllFeeds()`. Lives in a top-level provider. ~20-30 lines.
+- **Alt:** server-side polling endpoint + Vercel/cron. Heavier; defer until Phase 2 deploy.
+
+### Suspect files for Phase 1 edits
+- `src/store/calendar.ts` — `syncAllFeeds` defined `:694`, never called externally. Wire to interval.
+- `src/components/providers/` — likely home for a top-level `<AutoSyncProvider />` or hook
+- Maybe a new file `src/hooks/useAutoSync.ts`
+
+---
 
 ## Bug 2: scheduler ignores work hours/energy
-TBD — populated by Phase 0.6.
+
+### Findings: TWO simultaneous bugs
+
+#### Bug 2a — Timezone bug in `SlotScorer` (CRITICAL, correctness)
+- `src/services/scheduling/SlotScorer.ts:83-84` — `scoreEnergyLevelMatch()` calls `getEnergyLevelForTime(slot.start.getHours(), this.settings)`.
+- `slot.start` is a UTC `Date`. `.getHours()` returns hour in **server's local timezone** — on Docker container, that's UTC. User's `highEnergyStart`/`End` are stored as local hours (e.g., 9-11).
+- Result: if user UTC-5, 9am local = 14:00 UTC. `getEnergyLevelForTime(14, settings)` checks against ranges configured for local hours → returns wrong energy level (or none).
+- Same bug in `scoreTimePreference()` at `:108` — `const hour = slot.start.getHours();` no zone conversion.
+- **Contrast:** `TimeSlotManager.filterByWorkHours()` (`:279-303`) **does** correctly call `toZonedTime(slot.start, this.timeZone).getHours()` — work-hour HARD FILTER works.
+- `SlotScorer` constructor receives no timezone. `TimeSlotManagerImpl` reads `useSettingsStore.getState().user.timeZone` at `:59` but never passes it to `SlotScorer`.
+
+#### Bug 2b — Energy is soft-score only (DESIGN, may be intentional)
+- `SlotScorer.scoreEnergyLevelMatch()` returns 0-1 multiplied by weight 1.5.
+- Other weights: `deadlineProximity` 3.0, `priorityScore` 1.8.
+- High-priority/overdue task with mismatched energy still scores high enough to win — energy is overridden, not enforced.
+- May be intentional graceful degradation. Decide product-level whether to add hard filter.
+
+### Failure-mode verdicts
+- (a) data not read — NOT GUILTY on normal server path. Zustand fallback in `SchedulingService.ts:88-111` is dead-but-harmless on server.
+- (b) read+ignored — GUILTY for energy (soft score only, not enforced).
+- (c) broken predicate — GUILTY: timezone error in `SlotScorer`.
+- (d) UI not saving — NOT GUILTY. `AutoScheduleSettings.tsx` PATCH → `auto-schedule-settings/route.ts:55` upsert → all fields persisted correctly.
+
+### Minimal fix (Phase 1)
+**Three one-line changes, two files:**
+
+`src/services/scheduling/SlotScorer.ts` constructor:
+```ts
+constructor(
+  private settings: AutoScheduleSettings,
+  private scheduledTasks: Map<string, ProjectTask[]> = new Map(),
+  private timeZone: string = "UTC"
+) {}
+```
+
+`scoreEnergyLevelMatch()` `:84`:
+```ts
+const localHour = toZonedTime(slot.start, this.timeZone).getHours();
+const slotEnergy = getEnergyLevelForTime(localHour, this.settings);
+```
+
+`scoreTimePreference()` `:108`:
+```ts
+const hour = toZonedTime(slot.start, this.timeZone).getHours();
+```
+
+`src/services/scheduling/TimeSlotManager.ts:58`:
+```ts
+this.slotScorer = new SlotScorer(settings, new Map(), this.timeZone);
+```
+
+Plus `import { toZonedTime } from "@/lib/date-utils";` in `SlotScorer.ts`.
+
+### Bug 2b decision (defer or fix)
+- If Seneca wants energy STRICTLY enforced: add `filterByEnergyLevel()` step in `TimeSlotManager` after `filterByWorkHours()`. Probably 10 lines.
+- If soft-score is fine once timezone bug fixed: no change needed (most slots will land in correct energy windows naturally).
+- Recommend: fix 2a only in Phase 1, observe behavior, decide on 2b in Phase 3 friction window.
+
+### Tests gap
+- Zero tests on `SlotScorer`, `TimeSlotManager`, `TaskSchedulingService`. Phase 1 stretch: one Playwright test asserting tasks land inside narrow work hours after fix.
