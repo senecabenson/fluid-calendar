@@ -4,8 +4,13 @@ import { persist } from "zustand/middleware";
 import { logger } from "@/lib/logger";
 
 import { Settings } from "@/types/settings";
+import { useCalendarStore } from "./calendar";
 
 const LOG_SOURCE = "SettingsStore";
+
+// Module-level interval IDs for managing auto-sync timers
+let googleCalendarSyncIntervalId: NodeJS.Timeout | null = null;
+let outlookCalendarSyncIntervalId: NodeJS.Timeout | null = null;
 
 interface ConnectedAccount {
   id: string;
@@ -217,6 +222,70 @@ export const useSettingsStore = create<SettingsStore>()(
         set((state) => {
           // Update local state
           const newSettings = { ...state.integrations, ...settings };
+
+          // Manage Google Calendar sync interval
+          const prevGoogleAutoSync = state.integrations.googleCalendar.autoSync;
+          const newGoogleAutoSync = newSettings.googleCalendar.autoSync;
+          const googleIntervalMinutes = newSettings.googleCalendar.syncInterval;
+
+          if (newGoogleAutoSync && !prevGoogleAutoSync) {
+            // Transition: false → true (enable autoSync)
+            googleCalendarSyncIntervalId = setInterval(
+              () => useCalendarStore.getState().syncAllFeeds(),
+              googleIntervalMinutes * 60 * 1000
+            );
+          } else if (!newGoogleAutoSync && prevGoogleAutoSync) {
+            // Transition: true → false (disable autoSync)
+            if (googleCalendarSyncIntervalId) {
+              clearInterval(googleCalendarSyncIntervalId);
+              googleCalendarSyncIntervalId = null;
+            }
+          } else if (
+            newGoogleAutoSync &&
+            newSettings.googleCalendar.syncInterval !==
+              state.integrations.googleCalendar.syncInterval
+          ) {
+            // Interval changed while autoSync is still enabled
+            if (googleCalendarSyncIntervalId) {
+              clearInterval(googleCalendarSyncIntervalId);
+            }
+            googleCalendarSyncIntervalId = setInterval(
+              () => useCalendarStore.getState().syncAllFeeds(),
+              googleIntervalMinutes * 60 * 1000
+            );
+          }
+
+          // Manage Outlook Calendar sync interval
+          const prevOutlookAutoSync = state.integrations.outlookCalendar.autoSync;
+          const newOutlookAutoSync = newSettings.outlookCalendar.autoSync;
+          const outlookIntervalMinutes = newSettings.outlookCalendar.syncInterval;
+
+          if (newOutlookAutoSync && !prevOutlookAutoSync) {
+            // Transition: false → true (enable autoSync)
+            outlookCalendarSyncIntervalId = setInterval(
+              () => useCalendarStore.getState().syncAllFeeds(),
+              outlookIntervalMinutes * 60 * 1000
+            );
+          } else if (!newOutlookAutoSync && prevOutlookAutoSync) {
+            // Transition: true → false (disable autoSync)
+            if (outlookCalendarSyncIntervalId) {
+              clearInterval(outlookCalendarSyncIntervalId);
+              outlookCalendarSyncIntervalId = null;
+            }
+          } else if (
+            newOutlookAutoSync &&
+            newSettings.outlookCalendar.syncInterval !==
+              state.integrations.outlookCalendar.syncInterval
+          ) {
+            // Interval changed while autoSync is still enabled
+            if (outlookCalendarSyncIntervalId) {
+              clearInterval(outlookCalendarSyncIntervalId);
+            }
+            outlookCalendarSyncIntervalId = setInterval(
+              () => useCalendarStore.getState().syncAllFeeds(),
+              outlookIntervalMinutes * 60 * 1000
+            );
+          }
 
           // Save to database
           fetch("/api/integration-settings", {
