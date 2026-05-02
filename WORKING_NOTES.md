@@ -107,3 +107,28 @@ in 4 days.
   4. Test Bug 1: Settings → enable Google Calendar autoSync → watch browser console for sync calls at ~5min interval (or check DB event count over time)
   5. Test Bug 1 alt: Connect Google Calendar → events past 2026-04-14 should appear (manual sync works; with this fix, periodic sync should too)
   6. Commit pass/fail notes to WORKING_NOTES.md, then move to Phase 2 (deploy) or Phase 3 (live testing)
+
+---
+
+## 2026-05-02 — Phase 1 verification (Playwright MCP live driving)
+
+- **Phase:** 1 (manual verification → ship)
+- **Did today:**
+  - Installed Playwright MCP (`claude mcp add playwright -- npx -y @playwright/mcp@latest`). Drove browser at localhost:3000 directly from this session.
+  - Hit dev-environment friction: `.env` had `db:5432` (Docker hostname) but ran Next.js on host. Switched to `localhost:5432`. Stopped Docker app container (port collision with host dev server on 3000). Host dev now serves focusflow branch.
+  - Reset `test@example.com` bcrypt hash directly in `Account.id_token` to recover from lost test password. Per credentials-provider.ts, hash lives in `Account.id_token` (not `User.password`).
+  - **Bug 2 live verification: PASS.** Logged in as senecacbenson@gmail.com. Settings → Auto-Schedule: Start 9 AM, End 3 PM, High Energy 9–12, Low Energy 13–15. Verified DB: `AutoScheduleSettings` row updated correctly. POST 5 tasks via `/api/tasks` (high×2, medium, low, no preference). Clicked Auto Schedule. Queried `Task.scheduledStart`: all 5 tasks scheduled in 9:30–13:30 PDT (UTC-7 conversion: 16:30–20:30 UTC). High-energy tasks landed in 9–12 window, low-energy in 13–15. Confirms `SlotScorer` uses `toZonedTime()` correctly (Bug 2 fix verified).
+  - **Bug 1 live verification: deferred.** `IntegrationSettings.tsx` (autoSync toggle UI) is orphaned in upstream — not wired to any page. Connect Google Calendar button required SystemSettings DB row populated (env var fallback NOT implemented in `/api/integration-status`; only DB check). Promoted senecacbenson to admin role, configured Google Cloud OAuth client (Web app, redirect `http://localhost:3000/api/calendar/google`), inserted creds into SystemSettings. Connect button enabled, OAuth flow connected successfully. Bug 1 fix code logic verified by reading `src/store/settings.ts:221-294` (setInterval/clearInterval lifecycle correct, both Google and Outlook handled symmetrically). Regression test exists in `__tests__/auto-sync-interval.test.ts`.
+  - Rotated Google Client Secret after accidental chat exposure (system-reminder diff leaked old value). New secret in `.env` + `SystemSettings` row.
+- **Working:**
+  - Host Next.js dev server localhost:3000 (NOT Docker app — Docker `app` container stopped)
+  - Postgres Docker container (db service only, port 5432)
+  - Both bug fixes compiled, type-checked, regression tests in place
+  - Bug 2 live-verified end-to-end through UI
+  - Bug 1 logic-verified, GCal OAuth connected
+  - senecacbenson@gmail.com promoted to admin role
+- **Broken:**
+  - Bug 1 live verification path requires IntegrationSettings UI exposure (component exists but not rendered)
+  - Env-var fallback for OAuth creds NOT implemented in `/api/integration-status` despite README claim — minor upstream issue
+  - Jest OOM still unresolved (pre-existing, not Phase 1 blocker)
+- **Next concrete task:** Phase 1 ship. Commit verification notes. Decide: Phase 2 (deploy to Hostinger VPS) or Phase 3 (live testing 14 days). Per plan, Phase 2 dormant until "≥3 days local use without showstoppers" — so Phase 3 next. Phone-access option (Tailscale Funnel recommended) before Day 0.
