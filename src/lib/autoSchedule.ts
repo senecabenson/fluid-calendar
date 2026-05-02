@@ -25,7 +25,9 @@ export function stringifySelectedCalendars(calendars: string[]): string {
 }
 
 export function formatTime(hour: number): string {
-  return `${hour.toString().padStart(2, "0")}:00`;
+  const period = hour >= 12 ? "PM" : "AM";
+  const displayHour = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+  return `${displayHour}:00 ${period}`;
 }
 
 export function getEnergyLevelForTime(
