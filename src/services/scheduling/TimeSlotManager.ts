@@ -55,8 +55,8 @@ export class TimeSlotManagerImpl implements TimeSlotManager {
     private settings: AutoScheduleSettings,
     private calendarService: CalendarService
   ) {
-    this.slotScorer = new SlotScorer(settings);
     this.timeZone = useSettingsStore.getState().user.timeZone;
+    this.slotScorer = new SlotScorer(settings, new Map(), this.timeZone);
   }
 
   async updateScheduledTasks(userId: string): Promise<void> {
