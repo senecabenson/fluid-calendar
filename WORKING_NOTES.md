@@ -132,3 +132,17 @@ in 4 days.
   - Env-var fallback for OAuth creds NOT implemented in `/api/integration-status` despite README claim — minor upstream issue
   - Jest OOM still unresolved (pre-existing, not Phase 1 blocker)
 - **Next concrete task:** Phase 1 ship. Commit verification notes. Decide: Phase 2 (deploy to Hostinger VPS) or Phase 3 (live testing 14 days). Per plan, Phase 2 dormant until "≥3 days local use without showstoppers" — so Phase 3 next. Phone-access option (Tailscale Funnel recommended) before Day 0.
+
+---
+
+## 2026-05-03 — Phase 1 ship (Bug 1 live-verified)
+
+- **Phase:** 1 → ship complete
+- **Did today:**
+  - Exposed orphaned `IntegrationSettings` component by adding "Integrations" tab in `src/app/(common)/settings/page.tsx` (5 spots: import, type union, tabs array, valid-tab whitelist, switch case).
+  - **Bug 1 live verification: PASS.** Drove via Playwright MCP. Initial toggle-on with no prior Calendar visit produced ZERO sync API calls in 90s — root cause: `syncAllFeeds()` in `src/store/calendar.ts:694` iterates `feeds` from store state, but `IntegrationSettings.tsx` never calls `loadFromDatabase()` on mount (only `CalendarSettings.tsx` and `AutoScheduleSettings.tsx` do). Empty feeds → loop no-ops. After visiting #calendar tab once to populate the store, toggle-off→on at 01:52:42 UTC fired `syncAllFeeds()` at ~01:54:00 UTC — all 3 enabled GCal feeds (`Seneca - Personal`, `Family`, `Holidays in United States`) had `CalendarFeed.lastSync` advance from `01:36:xx` baseline to `01:53:41–01:54:02` (sequential per-feed `await` confirmed by staggered timestamps). Toggle-off at 01:54:29 → no further sync in next 90s (`clearInterval` works).
+  - **Known limitation (not fixing here, out of scope per plan):** Cold-load directly to `/settings#integrations` without visiting `/calendar` or other feed-loading pages first leaves the store's `feeds=[]`, so the freshly-armed interval no-ops on first fire. In real use this is unlikely (users hit `/calendar` constantly) but it's a one-line fix in `IntegrationSettings.tsx` (`useEffect(() => loadFromDatabase(), [])`). Defer to post-Phase-1 polish.
+  - Bug 2 already verified 2026-05-02. Phase 1 ships.
+- **Working:** Both Phase 1 fixes live-verified end-to-end. `focusflow` clean and pushed.
+- **Broken:** Cold-session feed-load gap noted above (low impact). Jest OOM still pre-existing.
+- **Next concrete task:** Phase 3 Day 0. Create FRICTIONS.md entry. Decide phone access (Tailscale Funnel recommended). Day 14 = 2026-05-17, gate Phase 2 (Hostinger VPS deploy) on ≥3 days clean local use first.
