@@ -8,6 +8,7 @@ import { authenticateRequest } from "@/lib/auth/api-auth";
 import { createAllDayDate, newDate, newDateFromYMD } from "@/lib/date-utils";
 import { createGoogleOAuthClient } from "@/lib/google";
 import { getGoogleCalendarClient } from "@/lib/google-calendar";
+import { syncGoogleCalendarFeed } from "@/lib/google-calendar/sync";
 import { prisma } from "@/lib/prisma";
 import { TokenManager } from "@/lib/token-manager";
 
@@ -119,11 +120,11 @@ export async function GET(request: NextRequest) {
       const calendar = google.calendar({ version: "v3", auth: oauth2Client });
       const calendarList = await calendar.calendarList.list();
 
-      // Store calendars
+      // Store calendars and trigger initial sync per feed
+      const newFeedIds: string[] = [];
       if (calendarList.data.items) {
         for (const cal of calendarList.data.items) {
           if (cal.id && cal.summary) {
-            // Check if calendar feed already exists
             const existingFeed = await prisma.calendarFeed.findFirst({
               where: {
                 type: "GOOGLE",
@@ -133,9 +134,8 @@ export async function GET(request: NextRequest) {
               },
             });
 
-            // Only create if it doesn't exist
             if (!existingFeed) {
-              await prisma.calendarFeed.create({
+              const created = await prisma.calendarFeed.create({
                 data: {
                   id: uuidv4(),
                   name: cal.summary,
@@ -146,8 +146,24 @@ export async function GET(request: NextRequest) {
                   userId,
                 },
               });
+              newFeedIds.push(created.id);
             }
           }
+        }
+      }
+
+      // Initial sync for newly-created feeds (fault-tolerant per feed)
+      for (const feedId of newFeedIds) {
+        try {
+          await syncGoogleCalendarFeed(feedId, userId);
+        } catch (err) {
+          console.error(`Initial sync failed for feed ${feedId}:`, err);
+          await prisma.calendarFeed.update({
+            where: { id: feedId, userId },
+            data: {
+              error: err instanceof Error ? err.message : "Unknown sync error",
+            },
+          });
         }
       }
 
@@ -435,7 +451,13 @@ export async function POST(request: NextRequest) {
       }, {timeout: 30000});
     }
 
-    return NextResponse.json(feed);
+    // Stamp lastSync now that events are stored
+    const updatedFeed = await prisma.calendarFeed.update({
+      where: { id: feed.id, userId },
+      data: { lastSync: newDate(), error: null },
+    });
+
+    return NextResponse.json(updatedFeed);
   } catch (error) {
     console.error("Failed to add calendar:", error);
     return NextResponse.json(
